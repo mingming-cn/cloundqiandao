@@ -2,15 +2,15 @@ import argparse
 import base64
 import re
 import time
-
 import requests
 import rsa
+from urllib import parse
 
 
 class CheckIn(object):
     client = requests.Session()
     login_url = "https://cloud.189.cn/api/portal/loginUrl.action?" \
-                "redirectURL=https://cloud.189.cn/web/redirect.html?returnURL=/main.action"
+                "redirectURL=https%3A%2F%2Fcloud.189.cn%2Fmain.action"
     submit_login_url = "https://open.e.189.cn/api/logbox/oauth2/loginSubmit.do"
     sign_url = ("https://api.cloud.189.cn/mkt/userSign.action?rand=%s"
                 "&clientType=TELEANDROID&version=8.6.3&model=SM-G930K")
@@ -71,30 +71,51 @@ class CheckIn(object):
         return result
 
     def login(self):
-        r = self.client.get(self.login_url)
-        captcha_token = re.findall(r"captchaToken' value='(.+?)'", r.text)[0]
-        lt = re.findall(r'lt = "(.+?)"', r.text)[0]
-        return_url = re.findall(r"returnUrl = '(.+?)'", r.text)[0]
-        param_id = re.findall(r'paramId = "(.+?)"', r.text)[0]
-        j_rsa_key = re.findall(r'j_rsaKey" value="(\S+)"', r.text, re.M)[0]
-        self.client.headers.update({"lt": lt})
+        r = self.client.get(self.login_url, allow_redirects=False)
+        r = self.client.get(r.headers['Location'], allow_redirects=False)
+        url = parse.urlparse(r.headers['Location'])
+        parad = parse.parse_qs(url.query)
+        appId = parad.get('appId')[0]
+        lt = parad.get('lt')[0]
+        reqId = parad.get('reqId')[0]
+
         headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:74.0) Gecko/20100101 Firefox/76.0",
-            "Referer": "https://open.e.189.cn/",
+            "lt": lt,
+            "reqid": reqId,
+            "referer": r.headers['Location'],
+            "origin": 'https://open.e.189.cn',
         }
         data = {
-            "appKey": "cloud",
+            "version": "2.0",
+            "appKey": appId,
+        }
+        appConf = self.client.post('https://open.e.189.cn/api/logbox/oauth2/appConf.do', data=data, headers=headers, timeout=5)
+        appConf = appConf.json()
+        encryptConf = self.client.post('https://open.e.189.cn/api/logbox/config/encryptConf.do', data=data, headers=headers, timeout=5)
+        encryptConf = encryptConf.json()
+        data = {
+            "version": "v2.0",
+            "apToken": "",
+            "appKey": appId,
             "accountType": "01",
-            "userName": f"{{RSA}}{self.rsa_encode(j_rsa_key, self.username)}",
-            "password": f"{{RSA}}{self.rsa_encode(j_rsa_key, self.password)}",
+            "userName": f"{{NRP}}{self.rsa_encode(encryptConf['data']['pubKey'], self.username)}",
+            "epd": f"{{NRP}}{self.rsa_encode(encryptConf['data']['pubKey'], self.password)}",
+            "captchaType": "",
             "validateCode": "",
-            "captchaToken": captcha_token,
-            "returnUrl": return_url,
+            "smsValidateCode": "",
+            "captchaToken": "",
+            "returnUrl": "https://cloud.189.cn/api/portal/callbackUnify.action?redirectURL=https://cloud.189.cn/main.action",
             "mailSuffix": "@189.cn",
-            "paramId": param_id,
+            "dynamicCheck": "FALSE",
+            "clientType": 1,
+            "cb_SaveName": "3",
+            "isOauth2": False,
+            "state": '',
+            "paramId": appConf['data']['paramId'],
         }
         r = self.client.post(self.submit_login_url, data=data, headers=headers, timeout=5)
-        print(r.json()["msg"])
+        if '密码不正确' in r.json()["msg"]:
+            raise Exception("密码不正确")
         if '图形验证码错误' in r.json()["msg"]:
             raise Exception("账户需输入验证码，请手动在app登录一次或修改密码后重试脚本")
         redirect_url = r.json()["toUrl"]
